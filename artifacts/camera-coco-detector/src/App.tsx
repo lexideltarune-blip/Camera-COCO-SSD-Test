@@ -11,6 +11,36 @@ type PositionedDetection = Detection & {
 };
 
 const SCAN_INTERVAL = 350;
+const INFERENCE_LONG_EDGE = 640;
+const RELATION_NEAR_THRESHOLD = 0.08;
+
+function describeSpatialRelationship(detections: Detection[], sourceWidth: number, sourceHeight: number) {
+  if (detections.length !== 2 || !sourceWidth || !sourceHeight) return '';
+
+  const [first, second] = detections;
+  const firstCenter = {
+    x: first.bbox[0] + first.bbox[2] / 2,
+    y: first.bbox[1] + first.bbox[3] / 2,
+  };
+  const secondCenter = {
+    x: second.bbox[0] + second.bbox[2] / 2,
+    y: second.bbox[1] + second.bbox[3] / 2,
+  };
+  const horizontalDistance = Math.abs(firstCenter.x - secondCenter.x) / sourceWidth;
+  const verticalDistance = Math.abs(firstCenter.y - secondCenter.y) / sourceHeight;
+
+  if (horizontalDistance < RELATION_NEAR_THRESHOLD && verticalDistance < RELATION_NEAR_THRESHOLD) {
+    return `The ${first.class} is near the ${second.class}`;
+  }
+  if (verticalDistance >= horizontalDistance) {
+    return firstCenter.y < secondCenter.y
+      ? `The ${first.class} is on the top of the ${second.class}`
+      : `The ${second.class} is on the top of the ${first.class}`;
+  }
+  return firstCenter.x < secondCenter.x
+    ? `The ${first.class} is on the left of the ${second.class}`
+    : `The ${second.class} is on the left of the ${first.class}`;
+}
 
 function formatTime(value: number | null) {
   if (!value) return '—';
@@ -73,6 +103,7 @@ function StatusDot({ state }: { state: AppState }) {
 function App() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
+  const inferenceCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const modelRef = useRef<cocoSsd.ObjectDetection | null>(null);
   const timerRef = useRef<number | null>(null);
@@ -104,7 +135,34 @@ function App() {
     if (!video || !detector || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || detectingRef.current) return;
     detectingRef.current = true;
     try {
-      const nextDetections = await detector.detect(video);
+      const videoWidth = video.videoWidth;
+      const videoHeight = video.videoHeight;
+      if (!videoWidth || !videoHeight) return;
+
+      const scale = Math.min(1, INFERENCE_LONG_EDGE / Math.max(videoWidth, videoHeight));
+      const inferenceWidth = Math.max(1, Math.round(videoWidth * scale));
+      const inferenceHeight = Math.max(1, Math.round(videoHeight * scale));
+      const canvas = inferenceCanvasRef.current ?? document.createElement('canvas');
+      inferenceCanvasRef.current = canvas;
+      if (canvas.width !== inferenceWidth || canvas.height !== inferenceHeight) {
+        canvas.width = inferenceWidth;
+        canvas.height = inferenceHeight;
+      }
+      const context = canvas.getContext('2d', { alpha: false });
+      if (!context) return;
+      context.drawImage(video, 0, 0, inferenceWidth, inferenceHeight);
+
+      const detectedOnSmallFrame = await detector.detect(canvas);
+      const coordinateScale = 1 / scale;
+      const nextDetections = detectedOnSmallFrame.map((detection) => ({
+        ...detection,
+        bbox: [
+          detection.bbox[0] * coordinateScale,
+          detection.bbox[1] * coordinateScale,
+          detection.bbox[2] * coordinateScale,
+          detection.bbox[3] * coordinateScale,
+        ] as [number, number, number, number],
+      }));
       setDetections(nextDetections);
       setLastScan(Date.now());
     } catch (detectionError) {
@@ -151,6 +209,13 @@ function App() {
     }
 
     try {
+      if (tf.getBackend() !== 'webgl') {
+        try {
+          await tf.setBackend('webgl');
+        } catch {
+          // TensorFlow.js will use its available fallback backend.
+        }
+      }
       await tf.ready();
       const loadedModel = modelRef.current ?? await cocoSsd.load({ base: 'lite_mobilenet_v2' });
       modelRef.current = loadedModel;
@@ -233,6 +298,12 @@ function App() {
     }));
   }, [detections, stageSize]);
 
+  const relationshipText = describeSpatialRelationship(
+    detections,
+    videoRef.current?.videoWidth ?? 0,
+    videoRef.current?.videoHeight ?? 0,
+  );
+
   return (
     <main className="lab-app flex h-full min-h-[100dvh] flex-col">
       <header className="relative z-10 flex shrink-0 items-center justify-between border-b border-[hsl(var(--border))] bg-[hsl(222_18%_9%/0.88)] px-4 py-3 backdrop-blur-md sm:px-6">
@@ -263,6 +334,11 @@ function App() {
           <div className="camera-grid" aria-hidden="true" />
           <div className="viewfinder" aria-hidden="true" />
           {state === 'running' && <div className="scan-line" aria-hidden="true" />}
+          {relationshipText && (
+            <div className="relationship-hud" role="status" aria-live="polite" data-testid="relationship-hud">
+              {relationshipText}
+            </div>
+          )}
           {positionedDetections.map((detection, index) => {
             return (
               <div
