@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Camera COCO-SSD Detector"
+description = "A focused browser camera test that opens the rear camera, runs COCO-SSD object detection every 350 milliseconds, and draws live bounding boxes and labels over the camera view."
+version = "1.0.0"
+id = "artifacts/camera-coco-detector"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 23612
+
+[services.development]
+run = "pnpm --filter @workspace/camera-coco-detector run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/camera-coco-detector", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/camera-coco-detector/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "23612"
+BASE_PATH = "/"
